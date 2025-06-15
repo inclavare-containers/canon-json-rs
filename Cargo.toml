@@ -1,12 +1,11 @@
 [package]
-name = "olpc-cjson"
-version = "0.1.4"
-description = "serde_json Formatter to serialize as OLPC-style canonical JSON"
-authors = ["iliana destroyer of worlds <iweller@amazon.com>"]
+name = "canon-json"
+version = "0.2.0"
+edition = "2021"
+description = "serde_json Formatter to serialize as canonical JSON"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/awslabs/tough"
+repository = "https://github.com/containers/canon-json-rs"
 keywords = ["json"]
-edition = "2018"
 
 [dependencies]
 serde = "1"
