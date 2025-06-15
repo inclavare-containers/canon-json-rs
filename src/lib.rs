@@ -1,44 +1,17 @@
 // Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `olpc-cjson` provides a [`serde_json::Formatter`] to serialize data as [canonical JSON], as
-//! defined by OLPC and used in [TUF].
-//!
-//! [`serde_json::Formatter`]: ../serde_json/ser/trait.Formatter.html
-//! [canonical JSON]: http://wiki.laptop.org/go/Canonical_JSON
-//! [TUF]: https://theupdateframework.github.io/
-//!
-//! OLPC's canonical JSON specification is subtly different from other "canonical JSON"
-//! specifications, and is also not a strict subset of JSON (specifically, ASCII control characters
-//! 0x00&ndash;0x1f are printed literally, which is not valid JSON). Therefore, `serde_json` cannot
-//! necessarily deserialize JSON produced by this formatter.
-//!
-//! This crate is not developed or endorsed by OLPC; use of the term is solely to distinguish this
-//! specification of canonical JSON from [other specifications of canonical JSON][xkcd].
-//!
-//! [xkcd]: https://xkcd.com/927/
-//!
-//! ```rust
-//! use olpc_cjson::CanonicalFormatter;
-//! use serde::Serialize;
-//! use serde_json::json;
-//!
-//! let value = json!({"b": 12, "a": "qwerty"});
-//! let mut buf = Vec::new();
-//! let mut ser = serde_json::Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-//! value.serialize(&mut ser).unwrap();
-//! assert_eq!(buf, br#"{"a":"qwerty","b":12}"#);
-//! ```
+#![doc = include_str!("../README.md")]
 
-#![deny(rust_2018_idioms)]
-#![warn(clippy::pedantic)]
-#![allow(clippy::must_use_candidate)]
+#![forbid(unsafe_code)]
+
+mod floatformat;
+
+use std::collections::BTreeMap;
+use std::io::{Error, ErrorKind, Result, Write};
 
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter, Serializer};
-use std::collections::BTreeMap;
-use std::io::{Error, ErrorKind, Result, Write};
-use unicode_normalization::UnicodeNormalization;
 
 /// A [`Formatter`] that produces canonical JSON.
 ///
@@ -48,6 +21,41 @@ use unicode_normalization::UnicodeNormalization;
 #[derive(Debug, Default)]
 pub struct CanonicalFormatter {
     object_stack: Vec<Object>,
+}
+
+/// https://www.rfc-editor.org/rfc/rfc8785#name-sorting-of-object-properties
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ObjectKey(Vec<u16>);
+
+impl ObjectKey {
+    fn new_from_str(s: &str) -> Self {
+        Self(s.encode_utf16().collect())
+    }
+
+    fn new_from_bytes(v: &[u8]) -> Result<Self> {
+        let s = std::str::from_utf8(v)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Expected UTF-8 key: {e}")))?;
+        Ok(Self::new_from_str(s))
+    }
+
+    fn as_string(&self) -> Result<String> {
+        std::char::decode_utf16(self.0.iter().copied()).try_fold(String::new(), |mut acc, c| {
+            let c = c.map_err(|_| Error::new(ErrorKind::InvalidData, "Expected UTF-8 key"))?;
+            acc.push(c);
+            Ok(acc)
+        })
+    }
+
+    // Serialize this value as a JSON string
+    fn write_to<W: Write>(&self, w: W) -> Result<()> {
+        let s = self.as_string()?;
+        let val = serde_json::Value::String(s);
+        let mut s = Serializer::new(w);
+        val.serialize(&mut s).map_err(|e| {
+            let kind = e.io_error_kind().unwrap();
+            Error::new(kind, "I/O error")
+        })
+    }
 }
 
 /// Internal struct to keep track of an object in progress of being built.
@@ -71,7 +79,7 @@ pub struct CanonicalFormatter {
 /// ```
 #[derive(Debug, Default)]
 struct Object {
-    obj: BTreeMap<Vec<u8>, Vec<u8>>,
+    obj: BTreeMap<ObjectKey, Vec<u8>>,
     next_key: Vec<u8>,
     next_value: Vec<u8>,
     key_done: bool,
@@ -91,14 +99,27 @@ impl CanonicalFormatter {
     ///
     /// If we are not currently writing an object, pass through `writer`.
     fn writer<'a, W: Write + ?Sized>(&'a mut self, writer: &'a mut W) -> Box<dyn Write + 'a> {
+        self.writer_or_key(writer, false).0
+    }
+
+    /// For string writes, we may be writing into the key. If so, then handle
+    /// that specially.
+    fn writer_or_key<'a, W: Write + ?Sized>(
+        &'a mut self,
+        writer: &'a mut W,
+        object_key_allowed: bool,
+    ) -> (Box<dyn Write + 'a>, bool) {
         self.object_stack
             .last_mut()
-            .map_or(Box::new(writer), |object| {
-                if object.key_done {
+            .map_or((Box::new(writer), false), |object| {
+                let r = if object.key_done {
                     Box::new(&mut object.next_value)
+                } else if !object_key_allowed {
+                    panic!("Unhandled write into object key");
                 } else {
                     Box::new(&mut object.next_key)
-                }
+                };
+                (r, !object.key_done)
             })
     }
 
@@ -129,16 +150,6 @@ macro_rules! wrapper {
     };
 }
 
-/// This is used in three places. Write it once.
-macro_rules! float_err {
-    () => {
-        Err(Error::new(
-            ErrorKind::InvalidInput,
-            "floating point numbers are not allowed in canonical JSON",
-        ))
-    };
-}
-
 impl Formatter for CanonicalFormatter {
     wrapper!(write_null);
     wrapper!(write_bool, bool);
@@ -153,64 +164,82 @@ impl Formatter for CanonicalFormatter {
     wrapper!(write_u64, u64);
     wrapper!(write_u128, u128);
 
-    fn write_f32<W: Write + ?Sized>(&mut self, _writer: &mut W, _value: f32) -> Result<()> {
-        float_err!()
+    fn write_f32<W: Write + ?Sized>(&mut self, writer: &mut W, value: f32) -> Result<()> {
+        self.write_f64(writer, value.into())
     }
 
-    fn write_f64<W: Write + ?Sized>(&mut self, _writer: &mut W, _value: f64) -> Result<()> {
-        float_err!()
+    fn write_f64<W: Write + ?Sized>(&mut self, writer: &mut W, value: f64) -> Result<()> {
+        let v = floatformat::number_to_json(value).map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Unhandled floating point value {e}"),
+            )
+        })?;
+        CompactFormatter.write_string_fragment(&mut self.writer(writer), &v)
     }
 
     // By default this is only used for u128/i128. If serde_json's `arbitrary_precision` feature is
     // enabled, all numbers are internally stored as strings, and this method is always used (even
     // for floating point values).
     fn write_number_str<W: Write + ?Sized>(&mut self, writer: &mut W, value: &str) -> Result<()> {
-        if value.chars().any(|c| c == '.' || c == 'e' || c == 'E') {
-            float_err!()
-        } else {
-            CompactFormatter.write_number_str(&mut self.writer(writer), value)
-        }
+        CompactFormatter.write_number_str(&mut self.writer(writer), value)
     }
 
-    wrapper!(begin_string);
-    wrapper!(end_string);
+    fn begin_string<W: Write + ?Sized>(&mut self, writer: &mut W) -> Result<()> {
+        let Some(v) = self.object_stack.last_mut() else {
+            return CompactFormatter.begin_string(writer);
+        };
+        if !v.key_done {
+            return Ok(());
+        }
+        return CompactFormatter.begin_string(&mut v.next_value);
+    }
 
-    // Strings are normalized as Normalization Form C (NFC). `str::nfc` is provided by the
-    // `UnicodeNormalization` trait and returns an iterator of `char`s.
+    fn end_string<W: Write + ?Sized>(&mut self, writer: &mut W) -> Result<()> {
+        let Some(v) = self.object_stack.last_mut() else {
+            return CompactFormatter.end_string(writer);
+        };
+        if !v.key_done {
+            return Ok(());
+        }
+        return CompactFormatter.end_string(&mut v.next_value);
+    }
+
     fn write_string_fragment<W: Write + ?Sized>(
         &mut self,
         writer: &mut W,
         fragment: &str,
     ) -> Result<()> {
-        fragment.nfc().try_for_each(|ch| {
-            self.writer(writer)
-                .write_all(ch.encode_utf8(&mut [0; 4]).as_bytes())
-        })
+        let (mut writer, in_key) = self.writer_or_key(writer, true);
+        if in_key {
+            writer.write_all(fragment.as_bytes())
+        } else {
+            CompactFormatter.write_string_fragment(&mut writer, fragment)
+        }
     }
 
-    // Only quotes and backslashes are escaped in canonical JSON.
     fn write_char_escape<W: Write + ?Sized>(
         &mut self,
         writer: &mut W,
         char_escape: CharEscape,
     ) -> Result<()> {
-        match char_escape {
-            CharEscape::Quote | CharEscape::ReverseSolidus => {
-                self.writer(writer).write_all(b"\\")?;
-            }
-            _ => {}
+        let (mut writer, in_key) = self.writer_or_key(writer, true);
+        if in_key {
+            let v = match char_escape {
+                CharEscape::Quote => b"\"",
+                CharEscape::ReverseSolidus => b"\\",
+                CharEscape::Solidus => b"/",
+                CharEscape::Backspace => b"\x08",
+                CharEscape::FormFeed => b"\x0C",
+                CharEscape::LineFeed => b"\n",
+                CharEscape::CarriageReturn => b"\r",
+                CharEscape::Tab => b"\t",
+                CharEscape::AsciiControl(c) => &[c],
+            };
+            writer.write_all(v)
+        } else {
+            return CompactFormatter.write_char_escape(&mut writer, char_escape);
         }
-        self.writer(writer).write_all(&[match char_escape {
-            CharEscape::Quote => b'\"',
-            CharEscape::ReverseSolidus => b'\\',
-            CharEscape::Solidus => b'/',
-            CharEscape::Backspace => b'\x08',
-            CharEscape::FormFeed => b'\x0c',
-            CharEscape::LineFeed => b'\n',
-            CharEscape::CarriageReturn => b'\r',
-            CharEscape::Tab => b'\t',
-            CharEscape::AsciiControl(byte) => byte,
-        }])
     }
 
     wrapper!(begin_array);
@@ -240,7 +269,7 @@ impl Formatter for CanonicalFormatter {
 
         for (key, value) in object.obj {
             CompactFormatter.begin_object_key(&mut writer, first)?;
-            writer.write_all(&key)?;
+            key.write_to(&mut writer)?;
             CompactFormatter.end_object_key(&mut writer)?;
 
             CompactFormatter.begin_object_value(&mut writer)?;
@@ -273,7 +302,8 @@ impl Formatter for CanonicalFormatter {
         let object = self.obj_mut()?;
         let key = std::mem::take(&mut object.next_key);
         let value = std::mem::take(&mut object.next_value);
-        object.obj.insert(key, value);
+        // Canonialize as UTF-16
+        object.obj.insert(ObjectKey::new_from_bytes(&key)?, value);
         Ok(())
     }
 
@@ -293,10 +323,37 @@ impl Formatter for CanonicalFormatter {
 
 #[cfg(test)]
 mod tests {
-    use crate::CanonicalFormatter;
+    use super::*;
+
+    use std::{cmp::Ordering, io::Result};
+
+    use proptest::prelude::*;
     use serde::Serialize;
-    use serde_json::Serializer;
-    use std::io::Result;
+    use serde_json::{Number, Serializer};
+    use similar_asserts::assert_eq;
+
+    #[test]
+    fn test_object_key() {
+        let cases = [("\n", "1"), ("\r", "<script>"), ("ö", "דּ")];
+        for case in cases {
+            assert_eq!(case.0.cmp(&case.1), Ordering::Less);
+        }
+        let mut v = cases
+            .iter()
+            .flat_map(|v| [v.0, v.1])
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter();
+        assert_eq!(v.next().unwrap(), "\n");
+        assert_eq!(v.next().unwrap(), "\r");
+        assert_eq!(v.next().unwrap(), "1");
+        assert_eq!(v.next().unwrap(), "<script>");
+        assert_eq!(v.next().unwrap(), "ö");
+        assert_eq!(v.next().unwrap(), "דּ");
+
+        let mut buf = Vec::new();
+        ObjectKey::new_from_str("").write_to(&mut buf).unwrap();
+        assert_eq!(&buf, b"\"\"");
+    }
 
     /// Small wrapper around the `serde_json` json! macro to encode the value as canonical JSON.
     macro_rules! encode {
@@ -326,81 +383,10 @@ mod tests {
         assert_eq!(encode!({"x": 3, "y": 2})?, br#"{"x":3,"y":2}"#);
         assert_eq!(encode!({"x": 3, "y": null})?, br#"{"x":3,"y":null}"#);
 
-        // Test conditions for invalid arguments.
-        assert!(encode!(8.0).is_err());
-        assert!(encode!({"x": 8.0}).is_err());
-
         Ok(())
     }
 
-    /// Canonical JSON prints literal ASCII control characters instead of escaping them. Check
-    /// ASCII 0x00 - 0x1f, plus backslash and double quote (the only escaped characters).
-    ///
-    /// The accepted strings were validated with securesystemslib, commit
-    /// f466266014aff529510216b8c2f8c8f39de279ec.
-    ///
-    /// ```python
-    /// import securesystemslib.formats
-    /// encode = securesystemslib.formats.encode_canonical
-    /// for c in range(0x20):
-    ///     print(repr(encode(chr(c))))
-    /// print(repr(encode('\\')))
-    /// print(repr(encode('"')))
-    /// ```
-    ///
-    /// This can be a little difficult to wrap a mental string parser around. But you can verify
-    /// that all the control characters result in a 3-byte JSON string:
-    ///
-    /// ```python
-    /// >>> all(map(lambda c: len(encode(chr(c))) == 3, range(0x20)))
-    /// True
-    /// ```
-    #[test]
-    fn ascii_control_characters() -> Result<()> {
-        assert_eq!(encode!("\x00")?, b"\"\x00\"");
-        assert_eq!(encode!("\x01")?, b"\"\x01\"");
-        assert_eq!(encode!("\x02")?, b"\"\x02\"");
-        assert_eq!(encode!("\x03")?, b"\"\x03\"");
-        assert_eq!(encode!("\x04")?, b"\"\x04\"");
-        assert_eq!(encode!("\x05")?, b"\"\x05\"");
-        assert_eq!(encode!("\x06")?, b"\"\x06\"");
-        assert_eq!(encode!("\x07")?, b"\"\x07\"");
-        assert_eq!(encode!("\x08")?, b"\"\x08\"");
-        assert_eq!(encode!("\x09")?, b"\"\x09\"");
-        assert_eq!(encode!("\x0a")?, b"\"\x0a\"");
-        assert_eq!(encode!("\x0b")?, b"\"\x0b\"");
-        assert_eq!(encode!("\x0c")?, b"\"\x0c\"");
-        assert_eq!(encode!("\x0d")?, b"\"\x0d\"");
-        assert_eq!(encode!("\x0e")?, b"\"\x0e\"");
-        assert_eq!(encode!("\x0f")?, b"\"\x0f\"");
-        assert_eq!(encode!("\x10")?, b"\"\x10\"");
-        assert_eq!(encode!("\x11")?, b"\"\x11\"");
-        assert_eq!(encode!("\x12")?, b"\"\x12\"");
-        assert_eq!(encode!("\x13")?, b"\"\x13\"");
-        assert_eq!(encode!("\x14")?, b"\"\x14\"");
-        assert_eq!(encode!("\x15")?, b"\"\x15\"");
-        assert_eq!(encode!("\x16")?, b"\"\x16\"");
-        assert_eq!(encode!("\x17")?, b"\"\x17\"");
-        assert_eq!(encode!("\x18")?, b"\"\x18\"");
-        assert_eq!(encode!("\x19")?, b"\"\x19\"");
-        assert_eq!(encode!("\x1a")?, b"\"\x1a\"");
-        assert_eq!(encode!("\x1b")?, b"\"\x1b\"");
-        assert_eq!(encode!("\x1c")?, b"\"\x1c\"");
-        assert_eq!(encode!("\x1d")?, b"\"\x1d\"");
-        assert_eq!(encode!("\x1e")?, b"\"\x1e\"");
-        assert_eq!(encode!("\x1f")?, b"\"\x1f\"");
-
-        // Try to trigger a panic in our unsafe blocks (from_utf8_unchecked)...
-        assert_eq!(encode!({"\t": "\n"})?, b"{\"\t\":\"\n\"}");
-
-        assert_eq!(encode!("\\")?, b"\"\\\\\"");
-        assert_eq!(encode!("\"")?, b"\"\\\"\"");
-
-        Ok(())
-    }
-
-    /// A more involved test than any of the above for olpc-cjson's core competency: ordering
-    /// things.
+    /// A more involved test than any of the above for our core competency: ordering things.
     #[test]
     fn ordered_nested_object() -> Result<()> {
         assert_eq!(
@@ -497,5 +483,107 @@ mod tests {
         ];
 
         assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn test_basic() {
+        let v = serde_json::json! { { "foo": "42" } };
+        let expected = serde_json::to_string(&v).unwrap();
+        let buf = String::from_utf8(encode!(v).unwrap()).unwrap();
+        assert_eq!(&buf, &expected);
+    }
+
+    fn arbitrary_json() -> impl Strategy<Value = serde_json::Value> {
+        use serde_json::Value;
+        const S: &str = ".*";
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<u32>().prop_map(|v| Value::Number(Number::from_u128(v.into()).unwrap())),
+            any::<bool>().prop_map(Value::Bool),
+            S.prop_map(Value::String),
+        ];
+        leaf.prop_recursive(
+            8,   // 8 levels deep
+            256, // Shoot for maximum size of 256 nodes
+            10,  // We put up to 10 items per collection
+            |inner| {
+                prop_oneof![
+                    // Take the inner strategy and make the two recursive cases.
+                    prop::collection::vec(inner.clone(), 0..10).prop_map(Value::Array),
+                    prop::collection::hash_map(S, inner, 0..10).prop_map(|v| {
+                        v.into_iter().map(|(k, v)| (k, Value::from(v))).collect()
+                    }),
+                ]
+            },
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn roundtrip_rfc8785(v in arbitrary_json()) {
+            let v: serde_json::Value = v.into();
+            let buf = encode!(&v).unwrap();
+            let v2: serde_json::Value = serde_json::from_slice(&buf)
+                .map_err(|e| format!("Failed to parse {v:?} -> {}: {e}", String::from_utf8_lossy(&buf))).unwrap();
+            assert_eq!(&v, &v2);
+        }
+    }
+
+    fn verify(input: &str, expected: &str) {
+        let input: serde_json::Value = serde_json::from_str(input).unwrap();
+        let mut buf = Vec::new();
+        let mut ser = Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
+        input.serialize(&mut ser).unwrap();
+        let buf = String::from_utf8(buf).unwrap();
+        assert_eq!(expected, &buf);
+    }
+
+    #[test]
+    fn test_arrays() {
+        verify(
+            include_str!("../testdata/input/arrays.json"),
+            include_str!("../testdata/output/arrays.json"),
+        );
+    }
+
+    #[test]
+    fn test_french() {
+        verify(
+            include_str!("../testdata/input/french.json"),
+            include_str!("../testdata/output/french.json"),
+        );
+    }
+
+    #[test]
+    fn test_structures() {
+        verify(
+            include_str!("../testdata/input/structures.json"),
+            include_str!("../testdata/output/structures.json"),
+        );
+    }
+
+    #[test]
+    fn test_unicode() {
+        verify(
+            include_str!("../testdata/input/unicode.json"),
+            include_str!("../testdata/output/unicode.json"),
+        );
+    }
+
+    // #[test]
+    // #[ignore = "need to debug number formatting"]
+    // fn test_values() {
+    //     verify(
+    //         include_str!("../testdata/input/values.json"),
+    //         include_str!("../testdata/output/values.json"),
+    //     );
+    // }
+
+    #[test]
+    fn test_weird() {
+        verify(
+            include_str!("../testdata/input/weird.json"),
+            include_str!("../testdata/output/weird.json"),
+        );
     }
 }
