@@ -93,7 +93,7 @@ enum WriterTarget<'w, W> {
     Buffer(&'w mut Vec<u8>),
 }
 
-impl<'w, W: Write> Write for WriterTarget<'w, W> {
+impl<W: Write> Write for WriterTarget<'_, W> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         match self {
             WriterTarget::Underlying(w) => w.write(buf),
@@ -222,7 +222,7 @@ impl Formatter for CanonicalFormatter {
         if !v.key_done {
             return Ok(());
         }
-        return CompactFormatter.begin_string(&mut v.next_value);
+        CompactFormatter.begin_string(&mut v.next_value)
     }
 
     fn end_string<W: Write + ?Sized>(&mut self, writer: &mut W) -> Result<()> {
@@ -232,7 +232,7 @@ impl Formatter for CanonicalFormatter {
         if !v.key_done {
             return Ok(());
         }
-        return CompactFormatter.end_string(&mut v.next_value);
+        CompactFormatter.end_string(&mut v.next_value)
     }
 
     fn write_string_fragment<W: Write + ?Sized>(
@@ -268,7 +268,7 @@ impl Formatter for CanonicalFormatter {
             };
             writer.write_all(v)
         } else {
-            return CompactFormatter.write_char_escape(&mut writer, char_escape);
+            CompactFormatter.write_char_escape(&mut writer, char_escape)
         }
     }
 
@@ -367,7 +367,7 @@ mod tests {
     fn test_object_key() {
         let cases = [("\n", "1"), ("\r", "<script>"), ("ö", "דּ")];
         for case in cases {
-            assert_eq!(case.0.cmp(&case.1), Ordering::Less);
+            assert_eq!(case.0.cmp(case.1), Ordering::Less);
         }
         let mut v = cases
             .iter()
@@ -541,9 +541,8 @@ mod tests {
                 prop_oneof![
                     // Take the inner strategy and make the two recursive cases.
                     prop::collection::vec(inner.clone(), 0..10).prop_map(Value::Array),
-                    prop::collection::hash_map(S, inner, 0..10).prop_map(|v| {
-                        v.into_iter().map(|(k, v)| (k, Value::from(v))).collect()
-                    }),
+                    prop::collection::hash_map(S, inner, 0..10)
+                        .prop_map(|v| { v.into_iter().collect() }),
                 ]
             },
         )
@@ -552,7 +551,6 @@ mod tests {
     proptest! {
         #[test]
         fn roundtrip_rfc8785(v in arbitrary_json()) {
-            let v: serde_json::Value = v.into();
             let buf = encode!(&v).unwrap();
             let v2: serde_json::Value = serde_json::from_slice(&buf)
                 .map_err(|e| format!("Failed to parse {v:?} -> {}: {e}", String::from_utf8_lossy(&buf))).unwrap();
@@ -658,7 +656,6 @@ mod tests {
         fn crosscheck_olpc_cjson(v in arbitrary_json()) {
             use olpc_cjson::CanonicalFormatter;
 
-            let v: serde_json::Value = v.into();
             let mut olpc_cjson_serialized = Vec::new();
             let mut ser = serde_json::Serializer::with_formatter(&mut olpc_cjson_serialized, CanonicalFormatter::new());
             prop_assume!(v.serialize(&mut ser).is_ok());

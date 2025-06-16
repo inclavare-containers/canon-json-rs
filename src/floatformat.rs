@@ -49,7 +49,7 @@ pub(crate) fn number_to_json(ieee_f64: f64) -> Result<String, NumberSerializatio
     // Special case: NaN and Infinity are invalid in JSON.
     // The JCS specification mandates that implementations must reject them.
     if (ieee_u64 & INVALID_PATTERN) == INVALID_PATTERN {
-        return Err(NumberSerializationError::Unserializable.into());
+        return Err(NumberSerializationError::Unserializable);
     }
 
     // Special case: Eliminate "-0" as mandated by the ES6/JCS specifications.
@@ -68,7 +68,7 @@ pub(crate) fn number_to_json(ieee_f64: f64) -> Result<String, NumberSerializatio
 
     // ES6 defines a specific range where numbers should be rendered in fixed-point
     // format ('f'), and scientific notation ('e') otherwise.
-    let es6_formatted = if num >= 1e-6 && num < 1e21 {
+    let es6_formatted = if (1e-6..1e21).contains(&num) {
         // For numbers within this range, use fixed-point notation.
         // Rust's default `to_string` for floats is suitable as it doesn't produce
         // unnecessary trailing zeros (e.g., 25.0 becomes "25").
@@ -85,7 +85,7 @@ pub(crate) fn number_to_json(ieee_f64: f64) -> Result<String, NumberSerializatio
             if scientific
                 .chars()
                 .nth(next_char_pos)
-                .map_or(false, |c| c.is_ascii_digit())
+                .is_some_and(|c| c.is_ascii_digit())
             {
                 scientific.insert(next_char_pos, '+');
             }
