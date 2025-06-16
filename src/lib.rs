@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #![doc = include_str!("../README.md")]
-
 #![forbid(unsafe_code)]
 
 mod floatformat;
@@ -330,6 +329,7 @@ mod tests {
     use proptest::prelude::*;
     use serde::Serialize;
     use serde_json::{Number, Serializer};
+    use sha2::{Digest, Sha256};
     use similar_asserts::assert_eq;
 
     #[test]
@@ -584,5 +584,41 @@ mod tests {
             include_str!("../testdata/input/weird.json"),
             include_str!("../testdata/output/weird.json"),
         );
+    }
+
+    #[test]
+    fn test_from_testdata() -> Result<()> {
+        use cap_std;
+
+        let amb = cap_std::ambient_authority();
+        let root =
+            cap_std::fs::Dir::open_ambient_dir(std::env::var("CARGO_MANIFEST_DIR").unwrap(), amb)?;
+        let dir = root.open_dir("testdata-cjson-orig")?;
+        for entry in dir.entries()? {
+            let entry = entry?;
+            let filename = entry.file_name();
+            let filename = filename.to_str().unwrap();
+            match filename {
+                "errors" => continue,
+                "LICENSE" => continue,
+                _ => {}
+            }
+
+            let json: serde_json::Value = serde_json::from_reader(entry.open()?)?;
+            let enc = encode!(json)?;
+            let mut sha256 = Sha256::new();
+            sha256.update(&enc);
+
+            // testdata sha256sum are computed with a trailing \n
+            sha256.update("\n");
+            let filename = filename.trim_end_matches(".json");
+            let hash = format!("{:x}", sha256.finalize());
+            assert_eq!(filename, hash);
+            let json2: serde_json::Value = serde_json::from_slice(&enc)?;
+
+            assert_eq!(json, json2)
+        }
+
+        Ok(())
     }
 }
