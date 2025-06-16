@@ -23,15 +23,25 @@
 //! The primary application for this is canonicalization, such as the
 //! [JSON Canonicalization Scheme (JCS)](https://tools.ietf.org/html/draft-rundgren-json-canonicalization-scheme-02).
 
+use thiserror::Error;
+
 // A constant bitmask to identify NaN and Infinity in an IEEE-754 f64.
 // If the exponent bits are all set, the number is non-finite.
 const INVALID_PATTERN: u64 = 0x7ff0_0000_0000_0000;
+
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum NumberSerializationError {
+    #[error("Unserializable number")]
+    /// This number is a NaN or Infinity
+    Unserializable,
+}
 
 /// Converts an `f64` floating-point number into its canonical JSON string representation.
 ///
 /// This function adheres to the ES6 specification for representing numbers, which is
 /// a requirement for JCS.
-pub(crate) fn number_to_json(ieee_f64: f64) -> Result<String, String> {
+pub(crate) fn number_to_json(ieee_f64: f64) -> Result<String, NumberSerializationError> {
     // By converting the f64 to its raw u64 bits, we can easily check for
     // non-finite values (NaN and Infinity).
     let ieee_u64 = ieee_f64.to_bits();
@@ -39,7 +49,7 @@ pub(crate) fn number_to_json(ieee_f64: f64) -> Result<String, String> {
     // Special case: NaN and Infinity are invalid in JSON.
     // The JCS specification mandates that implementations must reject them.
     if (ieee_u64 & INVALID_PATTERN) == INVALID_PATTERN {
-        return Err(format!("Invalid JSON number: {:x}", ieee_u64));
+        return Err(NumberSerializationError::Unserializable.into());
     }
 
     // Special case: Eliminate "-0" as mandated by the ES6/JCS specifications.
@@ -176,7 +186,10 @@ mod tests {
 
     #[test]
     fn test_error_message() {
-        let err = number_to_json(f64::NAN).unwrap_err();
-        assert!(err.starts_with("Invalid JSON number:"));
+        #[allow(unreachable_patterns)]
+        match number_to_json(f64::NAN).unwrap_err() {
+            NumberSerializationError::Unserializable => {}
+            _ => unreachable!(),
+        }
     }
 }
