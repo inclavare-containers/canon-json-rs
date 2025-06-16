@@ -652,4 +652,19 @@ mod tests {
 
         Ok(())
     }
+
+    proptest! {
+        #[test]
+        fn crosscheck_olpc_cjson(v in arbitrary_json()) {
+            use olpc_cjson::CanonicalFormatter;
+
+            let v: serde_json::Value = v.into();
+            let mut olpc_cjson_serialized = Vec::new();
+            let mut ser = serde_json::Serializer::with_formatter(&mut olpc_cjson_serialized, CanonicalFormatter::new());
+            prop_assume!(v.serialize(&mut ser).is_ok());
+
+            let buf = encode!(&v).unwrap();
+            assert_eq!(buf, olpc_cjson_serialized);
+        }
+    }
 }
