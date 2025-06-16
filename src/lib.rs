@@ -84,6 +84,34 @@ struct Object {
     key_done: bool,
 }
 
+/// A wrapper around a writer that directs output to either the underlying writer or a buffer.
+///
+/// This is used to capture the output for object keys and values before they are written to the
+/// final output, allowing for sorting of object properties.
+enum WriterTarget<'w, W> {
+    Underlying(W),
+    Buffer(&'w mut Vec<u8>),
+}
+
+impl<'w, W: Write> Write for WriterTarget<'w, W> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        match self {
+            WriterTarget::Underlying(w) => w.write(buf),
+            WriterTarget::Buffer(b) => {
+                b.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        match self {
+            WriterTarget::Underlying(w) => w.flush(),
+            WriterTarget::Buffer(_) => Ok(()),
+        }
+    }
+}
+
 impl CanonicalFormatter {
     /// Create a new `CanonicalFormatter` object.
     pub fn new() -> Self {
@@ -97,7 +125,10 @@ impl CanonicalFormatter {
     /// machine. See the docstrings for `Object` for more detail.
     ///
     /// If we are not currently writing an object, pass through `writer`.
-    fn writer<'a, W: Write + ?Sized>(&'a mut self, writer: &'a mut W) -> Box<dyn Write + 'a> {
+    fn writer<'a, W: Write + ?Sized>(
+        &'a mut self,
+        writer: &'a mut W,
+    ) -> WriterTarget<'a, &'a mut W> {
         self.writer_or_key(writer, false).0
     }
 
@@ -107,18 +138,18 @@ impl CanonicalFormatter {
         &'a mut self,
         writer: &'a mut W,
         object_key_allowed: bool,
-    ) -> (Box<dyn Write + 'a>, bool) {
+    ) -> (WriterTarget<'a, &'a mut W>, bool) {
         self.object_stack
             .last_mut()
-            .map_or((Box::new(writer), false), |object| {
+            .map_or((WriterTarget::Underlying(writer), false), |object| {
                 let r = if object.key_done {
-                    Box::new(&mut object.next_value)
+                    &mut object.next_value
                 } else if !object_key_allowed {
                     panic!("Unhandled write into object key");
                 } else {
-                    Box::new(&mut object.next_key)
+                    &mut object.next_key
                 };
-                (r, !object.key_done)
+                (WriterTarget::Buffer(r), !object.key_done)
             })
     }
 
