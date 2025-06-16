@@ -1,26 +1,58 @@
-name: Build and Test
+# Copied originally from https://github.com/coreos/repo-templates
+
+name: Rust
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
+permissions:
+  contents: read
+
+# don't waste job slots on superseded code
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned toolchain for linting
+  ACTIONS_LINTS_TOOLCHAIN: 1.76.0
 
 jobs:
-  build:
+  tests-stable:
+    name: Tests, stable toolchain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Build
-        run: rustup target add wasm32-unknown-unknown && rustup target add wasm32-wasi && cargo build && cargo build --target wasm32-unknown-unknown && cargo build --target wasm32-wasi
-      - name: Run tests
-        run: cargo test
-      - name: Set up Go
-        uses: actions/setup-go@v2
-      - name: Run integration tests
-        run: |
-          export GOPATH=$HOME/go && export GOBIN=$(go env GOPATH)/bin && export PATH=$PATH:$GOPATH && export PATH=$PATH:$GOBIN && mkdir -p $GOBIN
-          go get github.com/technosophos/canonjson
-          ./scripts/integration.sh
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build --all-targets --all-features
+      - name: cargo test
+        run: cargo test --all-targets --all-features
+      # https://github.com/rust-lang/cargo/issues/6669
+      - name: cargo test --doc
+        run: cargo test --doc --all-features
+  linting:
+    name: Lints, pinned toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.ACTIONS_LINTS_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: cargo fmt (check)
+        run: cargo fmt -- --check -l
+      - name: cargo clippy (warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
