@@ -1,17 +1,19 @@
-extern crate cjson;
-extern crate serde_json;
+// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::{env, fs, path};
+//! Convenience binary for reading a JSON document on stdin and outputting the canonical JSON form
+//! on stdout.
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let input = &args[1];
-    let input = fs::File::open(path::Path::new(input)).expect("cannot open input file");
-    let res: serde_json::Value =
-        serde_json::from_reader(input).expect("cannot deserialize input file");
+use olpc_cjson::CanonicalFormatter;
+use serde::Serialize;
+use serde_json::Serializer;
+use std::io;
 
-    println!(
-        "{}",
-        cjson::to_string(&res).expect("cannot write canonical JSON")
-    );
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+fn main() -> Result<()> {
+    let mut ser = Serializer::with_formatter(io::stdout(), CanonicalFormatter::new());
+    let value: serde_json::Value = serde_json::from_reader(io::stdin())?;
+    value.serialize(&mut ser)?;
+    Ok(())
 }
