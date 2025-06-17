@@ -351,6 +351,38 @@ impl Formatter for CanonicalFormatter {
     }
 }
 
+pub trait CanonJsonSerialize {
+    fn to_canon_json_writer<W>(&self, writer: W) -> Result<()>
+    where
+        W: Write;
+    fn to_canon_json_vec(&self) -> Result<Vec<u8>>;
+    fn to_canon_json_string(&self) -> Result<String>;
+}
+
+impl<S> CanonJsonSerialize for S
+where
+    S: Serialize,
+{
+    fn to_canon_json_writer<W>(&self, writer: W) -> Result<()>
+    where
+        W: Write,
+    {
+        let mut ser = serde_json::Serializer::with_formatter(writer, CanonicalFormatter::new());
+        Ok(self.serialize(&mut ser)?)
+    }
+
+    fn to_canon_json_vec(&self) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        self.to_canon_json_writer(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn to_canon_json_string(&self) -> Result<String> {
+        String::from_utf8(self.to_canon_json_vec()?)
+            .map_err(|err| Error::new(ErrorKind::InvalidData, err))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
