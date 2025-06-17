@@ -3,6 +3,7 @@
 
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 mod floatformat;
 
@@ -12,7 +13,7 @@ use std::io::{Error, ErrorKind, Result, Write};
 use serde::Serialize;
 use serde_json::ser::{CharEscape, CompactFormatter, Formatter, Serializer};
 
-/// A [`Formatter`] that produces canonical JSON.
+/// A [`Formatter`] that produces canonical (RFC 8785) JSON.
 ///
 /// See the [crate-level documentation](../index.html) for more detail.
 ///
@@ -351,11 +352,15 @@ impl Formatter for CanonicalFormatter {
     }
 }
 
+/// A helper trait to write canonical JSON.
 pub trait CanonJsonSerialize {
+    /// Serialize the given data structure as JSON into the I/O stream.
     fn to_canon_json_writer<W>(&self, writer: W) -> Result<()>
     where
         W: Write;
+    /// Serialize the given data structure as a JSON byte vector.
     fn to_canon_json_vec(&self) -> Result<Vec<u8>>;
+    /// Serialize the given data structure as a String.
     fn to_canon_json_string(&self) -> Result<String>;
 }
 
