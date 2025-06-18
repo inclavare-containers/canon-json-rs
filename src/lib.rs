@@ -372,7 +372,7 @@ where
     where
         W: Write,
     {
-        let mut ser = serde_json::Serializer::with_formatter(writer, CanonicalFormatter::new());
+        let mut ser = Serializer::with_formatter(writer, CanonicalFormatter::new());
         Ok(self.serialize(&mut ser)?)
     }
 
@@ -396,7 +396,7 @@ mod tests {
 
     use proptest::prelude::*;
     use serde::Serialize;
-    use serde_json::{Number, Serializer};
+    use serde_json::Number;
     use sha2::{Digest, Sha256};
     use similar_asserts::assert_eq;
 
@@ -427,10 +427,7 @@ mod tests {
     macro_rules! encode {
         ($($tt:tt)+) => {
             (|v: serde_json::Value| -> Result<Vec<u8>> {
-                let mut buf = Vec::new();
-                let mut ser = Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-                v.serialize(&mut ser)?;
-                Ok(buf)
+                v.to_canon_json_vec()
             })(serde_json::json!($($tt)+))
         };
     }
@@ -538,10 +535,6 @@ mod tests {
             i128: i128::MIN,
         };
 
-        let mut buf = Vec::new();
-        let mut ser = Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-        value.serialize(&mut ser).unwrap();
-
         let expected = [
             123, 34, 105, 49, 50, 56, 34, 58, 45, 49, 55, 48, 49, 52, 49, 49, 56, 51, 52, 54, 48,
             52, 54, 57, 50, 51, 49, 55, 51, 49, 54, 56, 55, 51, 48, 51, 55, 49, 53, 56, 56, 52, 49,
@@ -550,7 +543,7 @@ mod tests {
             55, 54, 56, 50, 49, 49, 52, 53, 53, 125,
         ];
 
-        assert_eq!(buf, expected);
+        assert_eq!(value.to_canon_json_vec().unwrap(), expected);
     }
 
     #[test]
@@ -597,11 +590,7 @@ mod tests {
 
     fn verify(input: &str, expected: &str) {
         let input: serde_json::Value = serde_json::from_str(input).unwrap();
-        let mut buf = Vec::new();
-        let mut ser = Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-        input.serialize(&mut ser).unwrap();
-        let buf = String::from_utf8(buf).unwrap();
-        assert_eq!(expected, &buf);
+        assert_eq!(expected, input.to_canon_json_string().unwrap());
     }
 
     #[test]
