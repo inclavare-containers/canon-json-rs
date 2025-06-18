@@ -372,7 +372,7 @@ where
     where
         W: Write,
     {
-        let mut ser = serde_json::Serializer::with_formatter(writer, CanonicalFormatter::new());
+        let mut ser = Serializer::with_formatter(writer, CanonicalFormatter::new());
         Ok(self.serialize(&mut ser)?)
     }
 
@@ -395,8 +395,7 @@ mod tests {
     use std::{cmp::Ordering, io::Result};
 
     use proptest::prelude::*;
-    use serde::Serialize;
-    use serde_json::{Number, Serializer};
+    use serde_json::Number;
     use sha2::{Digest, Sha256};
     use similar_asserts::assert_eq;
 
@@ -427,10 +426,7 @@ mod tests {
     macro_rules! encode {
         ($($tt:tt)+) => {
             (|v: serde_json::Value| -> Result<Vec<u8>> {
-                let mut buf = Vec::new();
-                let mut ser = Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-                v.serialize(&mut ser)?;
-                Ok(buf)
+                v.to_canon_json_vec()
             })(serde_json::json!($($tt)+))
         };
     }
@@ -538,10 +534,6 @@ mod tests {
             i128: i128::MIN,
         };
 
-        let mut buf = Vec::new();
-        let mut ser = Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-        value.serialize(&mut ser).unwrap();
-
         let expected = [
             123, 34, 105, 49, 50, 56, 34, 58, 45, 49, 55, 48, 49, 52, 49, 49, 56, 51, 52, 54, 48,
             52, 54, 57, 50, 51, 49, 55, 51, 49, 54, 56, 55, 51, 48, 51, 55, 49, 53, 56, 56, 52, 49,
@@ -550,7 +542,7 @@ mod tests {
             55, 54, 56, 50, 49, 49, 52, 53, 53, 125,
         ];
 
-        assert_eq!(buf, expected);
+        assert_eq!(value.to_canon_json_vec().unwrap(), expected);
     }
 
     #[test]
@@ -561,24 +553,23 @@ mod tests {
         assert_eq!(&buf, &expected);
     }
 
-    fn arbitrary_json() -> impl Strategy<Value = serde_json::Value> {
+    fn arbitrary_json(keyspace: &'static str) -> impl Strategy<Value = serde_json::Value> {
         use serde_json::Value;
-        const S: &str = ".*";
         let leaf = prop_oneof![
             Just(Value::Null),
             any::<u32>().prop_map(|v| Value::Number(Number::from_u128(v.into()).unwrap())),
             any::<bool>().prop_map(Value::Bool),
-            S.prop_map(Value::String),
+            keyspace.prop_map(Value::String),
         ];
         leaf.prop_recursive(
             8,   // 8 levels deep
             256, // Shoot for maximum size of 256 nodes
             10,  // We put up to 10 items per collection
-            |inner| {
+            move |inner| {
                 prop_oneof![
                     // Take the inner strategy and make the two recursive cases.
                     prop::collection::vec(inner.clone(), 0..10).prop_map(Value::Array),
-                    prop::collection::hash_map(S, inner, 0..10)
+                    prop::collection::hash_map(keyspace, inner, 0..10)
                         .prop_map(|v| { v.into_iter().collect() }),
                 ]
             },
@@ -587,7 +578,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn roundtrip_rfc8785(v in arbitrary_json()) {
+        fn roundtrip_rfc8785(v in arbitrary_json(".*")) {
             let buf = encode!(&v).unwrap();
             let v2: serde_json::Value = serde_json::from_slice(&buf)
                 .map_err(|e| format!("Failed to parse {v:?} -> {}: {e}", String::from_utf8_lossy(&buf))).unwrap();
@@ -597,11 +588,7 @@ mod tests {
 
     fn verify(input: &str, expected: &str) {
         let input: serde_json::Value = serde_json::from_str(input).unwrap();
-        let mut buf = Vec::new();
-        let mut ser = Serializer::with_formatter(&mut buf, CanonicalFormatter::new());
-        input.serialize(&mut ser).unwrap();
-        let buf = String::from_utf8(buf).unwrap();
-        assert_eq!(expected, &buf);
+        assert_eq!(expected, input.to_canon_json_string().unwrap());
     }
 
     #[test]
@@ -688,17 +675,44 @@ mod tests {
         Ok(())
     }
 
+    // Regex that excludes basically everything except printable ASCII
+    // because we know that e.g. olpc-cjson bombs on control characters,
+    // and also because it does NFC orering that will cause non-equivalency
+    // for some whitespace etc.
+    const ASCII_ALPHANUMERIC: &str = r"[a-zA-Z0-9]*";
+
     proptest! {
+        // Verify strict equivalency with printable ASCII only keys
         #[test]
-        fn crosscheck_olpc_cjson(v in arbitrary_json()) {
-            use olpc_cjson::CanonicalFormatter;
-
+        fn crosscheck_olpc_cjson_ascii(v in arbitrary_json(ASCII_ALPHANUMERIC)) {
+            let canon_json = String::from_utf8(encode!(&v).unwrap()).unwrap();
             let mut olpc_cjson_serialized = Vec::new();
-            let mut ser = serde_json::Serializer::with_formatter(&mut olpc_cjson_serialized, CanonicalFormatter::new());
-            prop_assume!(v.serialize(&mut ser).is_ok());
+            let mut ser = serde_json::Serializer::with_formatter(&mut olpc_cjson_serialized, olpc_cjson::CanonicalFormatter::new());
+            v.serialize(&mut ser).unwrap();
+            assert_eq!(canon_json, String::from_utf8(olpc_cjson_serialized).unwrap());
+        }
+    }
 
+    proptest! {
+        // Verify strict equivalency with printable ASCII only keys
+        #[test]
+        fn crosscheck_cjson_ascii(v in arbitrary_json(ASCII_ALPHANUMERIC)) {
+            let canon_json = String::from_utf8(encode!(&v).unwrap()).unwrap();
+            let cjson = String::from_utf8(cjson::to_vec(&v).unwrap()).unwrap();
+            assert_eq!(canon_json, cjson);
+        }
+
+        // Verify equivalency (after sorting) with non-ASCII keys
+        #[test]
+        fn crosscheck_cjson(v in arbitrary_json(".*")) {
             let buf = encode!(&v).unwrap();
-            assert_eq!(buf, olpc_cjson_serialized);
+            let self_reparsed = serde_json::from_slice::<serde_json::Value>(&buf).unwrap();
+            let buf = cjson::to_vec(&v).unwrap();
+            let cjson_reparsed = serde_json::from_slice::<serde_json::Value>(&buf).unwrap();
+            // As above with olpc-cjson, this relies on the fact that serde_json
+            // sorts object keys by default.
+            assert_eq!(self_reparsed, v);
+            assert_eq!(cjson_reparsed, v);
         }
     }
 }

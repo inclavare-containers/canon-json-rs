@@ -20,3 +20,4 @@ cap-std = "3.4.4"
 sha2 = "0.10.9"
 # For cross-integration testing
 olpc-cjson = "0.1"
+cjson = "0.1.2"
