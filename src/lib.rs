@@ -259,18 +259,17 @@ impl Formatter for CanonicalFormatter {
     ) -> Result<()> {
         let (mut writer, in_key) = self.writer_or_key(writer, true);
         if in_key {
-            let v = match char_escape {
-                CharEscape::Quote => b"\"",
-                CharEscape::ReverseSolidus => b"\\",
-                CharEscape::Solidus => b"/",
-                CharEscape::Backspace => b"\x08",
-                CharEscape::FormFeed => b"\x0C",
-                CharEscape::LineFeed => b"\n",
-                CharEscape::CarriageReturn => b"\r",
-                CharEscape::Tab => b"\t",
-                CharEscape::AsciiControl(c) => &[c],
-            };
-            writer.write_all(v)
+            match char_escape {
+                CharEscape::Quote => writer.write_all(b"\""),
+                CharEscape::ReverseSolidus => writer.write_all(b"\\"),
+                CharEscape::Solidus => writer.write_all(b"/"),
+                CharEscape::Backspace => writer.write_all(b"\x08"),
+                CharEscape::FormFeed => writer.write_all(b"\x0C"),
+                CharEscape::LineFeed => writer.write_all(b"\n"),
+                CharEscape::CarriageReturn => writer.write_all(b"\r"),
+                CharEscape::Tab => writer.write_all(b"\t"),
+                CharEscape::AsciiControl(c) => writer.write_all(&[c]),
+            }
         } else {
             CompactFormatter.write_char_escape(&mut writer, char_escape)
         }
